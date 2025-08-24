@@ -16,9 +16,32 @@ A Model Context Protocol (MCP) server that provides tools for generating and man
 
 ## Installation
 
+### 1. Install the MCP Server
 ```bash
 cd chaostoolkit-aws-mcp-server
 uv venv && uv sync --all-groups
+```
+
+### 2. Install Required Chaos Toolkit Extensions
+```bash
+# Install Chaos Toolkit core
+pip install chaostoolkit
+
+# Install AWS extension
+pip install chaostoolkit-aws
+
+# Install AWS AZ Failure extension (required for AZ failure experiments)
+pip install aws-az-failure-chaostoolkit
+```
+
+### 3. Configure AWS Credentials
+```bash
+# For AWS China regions
+aws configure --profile awscn
+AWS Access Key ID [None]: your-access-key
+AWS Secret Access Key [None]: your-secret-key
+Default region name [None]: cn-north-1
+Default output format [None]: json
 ```
 
 ## Usage
@@ -186,6 +209,7 @@ This server implements all chaos actions from the specification:
 - Python 3.10+
 - Chaos Toolkit installed (`pip install chaostoolkit`)
 - Chaos Toolkit AWS extension (`pip install chaostoolkit-aws`)
+- AWS AZ Failure Chaos Toolkit extension (`pip install aws-az-failure-chaostoolkit`)
 - AWS credentials configured
 - Required AWS permissions for the chaos actions
 
