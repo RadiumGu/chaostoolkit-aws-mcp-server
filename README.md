@@ -16,22 +16,26 @@ A Model Context Protocol (MCP) server that provides tools for generating and man
 
 ## Installation
 
-### 1. Install the MCP Server
+### For New Environment
+
 ```bash
+# 1. Clone the repository
+git clone https://github.com/your-username/chaostoolkit-aws-mcp-server.git
 cd chaostoolkit-aws-mcp-server
-uv venv && uv sync --all-groups
+
+# 2. Install dependencies with uv
+uv sync --all-groups
+
+# 3. Install additional Chaos Toolkit dependencies
+pip install chaostoolkit chaostoolkit-aws aws-az-failure-chaostoolkit
 ```
 
-### 2. Install Required Chaos Toolkit Extensions
+### For Existing Environment
+
 ```bash
-# Install Chaos Toolkit core
-pip install chaostoolkit
-
-# Install AWS extension
-pip install chaostoolkit-aws
-
-# Install AWS AZ Failure extension (required for AZ failure experiments)
-pip install aws-az-failure-chaostoolkit
+# Update dependencies
+cd chaostoolkit-aws-mcp-server
+uv sync --all-groups
 ```
 
 ### 3. Configure AWS Credentials
