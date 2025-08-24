@@ -20,7 +20,11 @@ A Model Context Protocol (MCP) server that provides tools for generating and man
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/your-username/chaostoolkit-aws-mcp-server.git
+# Option 1: GitHub
+git clone https://github.com/RadiumGu/chaostoolkit-aws-mcp-server.git
+# Option 2: Gitee (China mirror)
+git clone https://gitee.com/radiumgu/chaostoolkit-aws-mcp-server.git
+
 cd chaostoolkit-aws-mcp-server
 
 # 2. Install dependencies with uv
