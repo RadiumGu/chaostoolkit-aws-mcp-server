@@ -1,226 +1,336 @@
-"""Tests for the Chaos Toolkit AWS MCP Server"""
+"""Tests for the MCP server layer: dispatch, run, validate and rollback."""
+
+from __future__ import annotations
 
 import json
-import tempfile
+import shutil
+from collections.abc import Sequence
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from typing import Any
 
 import pytest
 
-from chaostoolkit_aws_mcp_server.server import (
-    ActionConfig,
-    ExperimentConfig,
-    ProbeConfig,
-    generate_experiment_json,
-    generate_az_failure_experiment,
-    generate_asg_az_failure_experiment,
-    generate_ec2_actions_experiment,
-    validate_experiment,
-)
+from chaostoolkit_aws_mcp_server import safety
+from chaostoolkit_aws_mcp_server import server as server_module
+from chaostoolkit_aws_mcp_server.server import CommandResult
+
+from .conftest import INSTANCE_ID
 
 
-class TestExperimentGeneration:
-    """Test experiment generation functions"""
+@pytest.fixture
+def recorded_commands(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
+    """Capture chaos CLI invocations instead of running them."""
+    commands: list[list[str]] = []
 
-    def test_generate_experiment_json(self):
-        """Test basic experiment JSON generation"""
-        config = ExperimentConfig(
-            title="Test Experiment",
-            description="Test description",
-            aws_region="us-east-1"
+    async def fake_run(command: Sequence[str], cwd: Path, timeout: int) -> CommandResult:
+        commands.append(list(command))
+        return CommandResult(exit_code=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(server_module, "_run_command", fake_run)
+    monkeypatch.setattr(server_module, "_chaos_executable", lambda: "chaos")
+    return commands
+
+
+def _experiment_file(workdir: Path, name: str = "experiment.json") -> Path:
+    path = workdir / name
+    path.write_text(json.dumps({"version": "1.0.0", "title": "t", "method": []}), encoding="utf-8")
+    return path
+
+
+class TestListTools:
+    @pytest.mark.asyncio
+    async def test_list_tools_returns_catalog(self) -> None:
+        from chaostoolkit_aws_mcp_server import catalog
+
+        tools = await server_module.list_tools()
+
+        assert [tool.name for tool in tools] == [tool.name for tool in catalog.TOOLS]
+        assert all(tool.description for tool in tools)
+
+
+class TestDispatch:
+    @pytest.mark.asyncio
+    async def test_generation_tool_writes_file(self, workdir: Path) -> None:
+        result = await server_module.dispatch(
+            "chaos_stop_instances", {"title": "t", "instance_ids": [INSTANCE_ID]}
         )
-        
-        probes = [ProbeConfig(
-            name="test_probe",
-            module="test.module",
-            func="test_func",
-            arguments={"arg1": "value1"}
-        )]
-        
-        actions = [ActionConfig(
-            name="test_action",
-            module="test.module",
-            func="test_action_func",
-            arguments={"arg2": "value2"}
-        )]
-        
-        rollbacks = [ActionConfig(
-            name="test_rollback",
-            module="test.module", 
-            func="test_rollback_func",
-            arguments={"arg3": "value3"}
-        )]
-        
-        result = generate_experiment_json(config, probes, actions, rollbacks)
-        
-        assert result["title"] == "Test Experiment"
-        assert result["description"] == "Test description"
-        assert result["configuration"]["aws_region"] == "us-east-1"
-        assert len(result["steady-state-hypothesis"]["probes"]) == 1
-        assert len(result["method"]) == 1
-        assert len(result["rollbacks"]) == 1
 
-    @pytest.mark.asyncio
-    async def test_generate_az_failure_experiment(self):
-        """Test AZ failure experiment generation"""
-        args = {
-            "title": "AZ Failure Test",
-            "az": "us-east-1a",
-            "failure_type": "network",
-            "dry_run": False,
-            "health_check_url": "http://test.com/health",
-            "state_path": "./test_fail_az.ec2.json",
-            "output_file": "./test_az_experiment.json",
-            "aws_region": "us-east-1"
-        }
-        
-        with tempfile.TemporaryDirectory() as temp_dir:
-            output_file = Path(temp_dir) / "test_az_experiment.json"
-            args["output_file"] = str(output_file)
-            
-            result = await generate_az_failure_experiment(args)
-            
-            assert len(result) == 1
-            assert "Generated AZ failure experiment" in result[0]["text"]
-            assert output_file.exists()
-            
-            # Verify the generated experiment file
-            with open(output_file) as f:
-                experiment = json.load(f)
-            
-            assert experiment["title"] == "AZ Failure Test"
-            assert experiment["configuration"]["aws_region"] == "us-east-1"
-            assert len(experiment["method"]) == 1
-            assert experiment["method"][0]["provider"]["module"] == "azchaosaws.ec2.actions"
-            assert experiment["method"][0]["provider"]["func"] == "fail_az"
-
-    @pytest.mark.asyncio
-    async def test_generate_asg_az_failure_experiment(self):
-        """Test ASG AZ failure experiment generation"""
-        args = {
-            "title": "ASG AZ Failure Test",
-            "az": "us-east-1a",
-            "asg_tags": [{"Key": "Environment", "Value": "test"}],
-            "dry_run": True,
-            "output_file": "./test_asg_experiment.json",
-            "aws_region": "us-west-2"
-        }
-        
-        with tempfile.TemporaryDirectory() as temp_dir:
-            output_file = Path(temp_dir) / "test_asg_experiment.json"
-            args["output_file"] = str(output_file)
-            
-            result = await generate_asg_az_failure_experiment(args)
-            
-            assert len(result) == 1
-            assert "Generated ASG AZ failure experiment" in result[0]["text"]
-            assert output_file.exists()
-            
-            # Verify the generated experiment file
-            with open(output_file) as f:
-                experiment = json.load(f)
-            
-            assert experiment["title"] == "ASG AZ Failure Test"
-            assert experiment["configuration"]["aws_region"] == "us-west-2"
-            assert experiment["method"][0]["provider"]["module"] == "azchaosaws.asg.actions"
-
-    @pytest.mark.asyncio
-    async def test_generate_ec2_actions_experiment(self):
-        """Test EC2 actions experiment generation"""
-        args = {
-            "title": "EC2 Stop Test",
-            "action_type": "stop_instances",
-            "instance_ids": ["i-1234567890abcdef0"],
-            "az": "us-east-1a",
-            "output_file": "./test_ec2_experiment.json",
-            "aws_region": "us-east-1"
-        }
-        
-        with tempfile.TemporaryDirectory() as temp_dir:
-            output_file = Path(temp_dir) / "test_ec2_experiment.json"
-            args["output_file"] = str(output_file)
-            
-            result = await generate_ec2_actions_experiment(args)
-            
-            assert len(result) == 1
-            assert "Generated EC2 stop_instances experiment" in result[0]["text"]
-            assert output_file.exists()
-            
-            # Verify the generated experiment file
-            with open(output_file) as f:
-                experiment = json.load(f)
-            
-            assert experiment["title"] == "EC2 Stop Test"
-            assert experiment["method"][0]["provider"]["module"] == "chaosaws.ec2.actions"
-            assert experiment["method"][0]["provider"]["func"] == "stop_instances"
-
-    @pytest.mark.asyncio
-    async def test_validate_experiment_success(self):
-        """Test successful experiment validation"""
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
-            json.dump({"title": "Test", "method": []}, f)
-            experiment_file = f.name
-        
-        try:
-            with patch('subprocess.run') as mock_run:
-                mock_run.return_value = MagicMock(returncode=0, stdout="Valid", stderr="")
-                
-                result = await validate_experiment({"experiment_file": experiment_file})
-                
-                assert len(result) == 1
-                assert "PASSED" in result[0]["text"]
-                mock_run.assert_called_once()
-        finally:
-            Path(experiment_file).unlink()
-
-    @pytest.mark.asyncio
-    async def test_validate_experiment_file_not_found(self):
-        """Test validation with non-existent file"""
-        result = await validate_experiment({"experiment_file": "./nonexistent.json"})
-        
         assert len(result) == 1
-        assert "Error: Experiment file not found" in result[0]["text"]
+        assert "Generated experiment" in result[0].text
+        assert (workdir / "stop-instances-experiment.json").is_file()
 
-
-class TestConfigModels:
-    """Test configuration models"""
-
-    def test_experiment_config_defaults(self):
-        """Test ExperimentConfig with defaults"""
-        config = ExperimentConfig(title="Test")
-        
-        assert config.title == "Test"
-        assert config.description == ""
-        assert config.aws_region == "us-east-1"
-        assert config.tags == []
-
-    def test_probe_config(self):
-        """Test ProbeConfig"""
-        probe = ProbeConfig(
-            name="test_probe",
-            module="test.module",
-            func="test_func",
-            arguments={"key": "value"}
+    @pytest.mark.asyncio
+    async def test_deprecated_alias_is_reported(self, workdir: Path) -> None:
+        result = await server_module.dispatch(
+            "chaos_reboot_instances", {"title": "t", "instance_ids": [INSTANCE_ID]}
         )
-        
-        assert probe.name == "test_probe"
-        assert probe.type == "probe"
-        assert probe.module == "test.module"
-        assert probe.func == "test_func"
-        assert probe.arguments == {"key": "value"}
-        assert probe.tolerance is True
 
-    def test_action_config(self):
-        """Test ActionConfig"""
-        action = ActionConfig(
-            name="test_action",
-            module="test.module",
-            func="test_func",
-            arguments={"key": "value"}
+        assert "is deprecated, use 'chaos_restart_instances'" in result[0].text
+        assert "restart_instances" in result[0].text
+
+    @pytest.mark.asyncio
+    async def test_unknown_tool_is_an_error(self, workdir: Path) -> None:
+        result = await server_module.call_tool("chaos_nope", {})
+
+        assert result[0].text.startswith("Error: unknown tool: chaos_nope")
+
+    @pytest.mark.asyncio
+    async def test_validation_error_is_returned_as_text(self, workdir: Path) -> None:
+        result = await server_module.call_tool("chaos_stop_instances", {"title": "t"})
+
+        assert result[0].text.startswith("Error:")
+        assert "at least one of" in result[0].text
+
+    @pytest.mark.asyncio
+    async def test_missing_arguments_are_tolerated(self, workdir: Path) -> None:
+        result = await server_module.call_tool("chaos_stop_instances", None)
+
+        assert result[0].text.startswith("Error:")
+
+
+class TestRunExperiment:
+    @pytest.mark.asyncio
+    async def test_dry_run_is_the_default(
+        self, workdir: Path, recorded_commands: list[list[str]]
+    ) -> None:
+        path = _experiment_file(workdir)
+
+        result = await server_module.run_experiment({"experiment_file": str(path)})
+
+        assert recorded_commands == [
+            ["chaos", "run", str(path), "--dry", "activities", "--rollback-strategy", "default"]
+        ]
+        assert "dry run" in result[0].text
+        assert "SUCCESS" in result[0].text
+
+    @pytest.mark.asyncio
+    async def test_real_run_requires_confirmation(
+        self, workdir: Path, recorded_commands: list[list[str]]
+    ) -> None:
+        path = _experiment_file(workdir)
+
+        result = await server_module.run_experiment(
+            {"experiment_file": str(path), "dry_run": False}
         )
-        
-        assert action.name == "test_action"
-        assert action.type == "action"
-        assert action.module == "test.module"
-        assert action.func == "test_func"
-        assert action.arguments == {"key": "value"}
+
+        assert recorded_commands == []
+        assert "confirm_destructive=true" in result[0].text
+
+    @pytest.mark.asyncio
+    async def test_confirmed_run_executes_without_dry_flag(
+        self, workdir: Path, recorded_commands: list[list[str]]
+    ) -> None:
+        path = _experiment_file(workdir)
+
+        await server_module.run_experiment(
+            {
+                "experiment_file": str(path),
+                "dry_run": False,
+                "confirm_destructive": True,
+                "journal_path": "./journal.json",
+                "rollback_strategy": "always",
+            }
+        )
+
+        command = recorded_commands[0]
+        assert "--dry" not in command
+        assert command[-2:] == ["--rollback-strategy", "always"]
+        assert str(workdir / "journal.json") in command
+
+    @pytest.mark.asyncio
+    async def test_missing_experiment_file(
+        self, workdir: Path, recorded_commands: list[list[str]]
+    ) -> None:
+        with pytest.raises(safety.ValidationError, match="not found"):
+            await server_module.run_experiment({"experiment_file": "./missing.json"})
+
+    @pytest.mark.asyncio
+    async def test_experiment_file_outside_workdir_is_rejected(
+        self, workdir: Path, recorded_commands: list[list[str]]
+    ) -> None:
+        with pytest.raises(safety.ValidationError, match="must stay inside"):
+            await server_module.run_experiment({"experiment_file": "/etc/hosts"})
+
+    @pytest.mark.asyncio
+    async def test_timeout_is_reported(
+        self, workdir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        path = _experiment_file(workdir)
+
+        async def timing_out(command: Sequence[str], cwd: Path, timeout: int) -> CommandResult:
+            return CommandResult(-1, "", "command timed out after 1 seconds", timed_out=True)
+
+        monkeypatch.setattr(server_module, "_run_command", timing_out)
+        monkeypatch.setattr(server_module, "_chaos_executable", lambda: "chaos")
+
+        result = await server_module.run_experiment(
+            {"experiment_file": str(path), "timeout_seconds": 1}
+        )
+
+        assert "TIMED OUT" in result[0].text
+
+    @pytest.mark.asyncio
+    async def test_missing_chaos_cli(self, workdir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        path = _experiment_file(workdir)
+        monkeypatch.setattr(shutil, "which", lambda _: None)
+
+        result = await server_module.call_tool(
+            "chaos_run_experiment", {"experiment_file": str(path)}
+        )
+
+        assert "'chaos' CLI was not found" in result[0].text
+
+
+class TestValidateExperiment:
+    @pytest.mark.asyncio
+    async def test_valid_file_runs_chaos_validate(
+        self, workdir: Path, recorded_commands: list[list[str]]
+    ) -> None:
+        path = _experiment_file(workdir)
+
+        result = await server_module.validate_experiment({"experiment_file": str(path)})
+
+        assert recorded_commands == [["chaos", "validate", str(path)]]
+        assert "SUCCESS" in result[0].text
+
+    @pytest.mark.asyncio
+    async def test_broken_json_fails_before_calling_chaos(
+        self, workdir: Path, recorded_commands: list[list[str]]
+    ) -> None:
+        path = workdir / "broken.json"
+        path.write_text("{not json", encoding="utf-8")
+
+        result = await server_module.validate_experiment({"experiment_file": str(path)})
+
+        assert recorded_commands == []
+        assert "Invalid JSON" in result[0].text
+
+    @pytest.mark.asyncio
+    async def test_working_directory_is_honoured(
+        self, workdir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        nested = workdir / "nested"
+        nested.mkdir()
+        path = _experiment_file(nested)
+        seen: dict[str, Path] = {}
+
+        async def fake_run(command: Sequence[str], cwd: Path, timeout: int) -> CommandResult:
+            seen["cwd"] = cwd
+            return CommandResult(0, "", "")
+
+        monkeypatch.setattr(server_module, "_run_command", fake_run)
+        monkeypatch.setattr(server_module, "_chaos_executable", lambda: "chaos")
+
+        await server_module.validate_experiment(
+            {"experiment_file": str(path), "working_directory": "nested"}
+        )
+
+        assert seen["cwd"] == nested
+
+
+class TestRollbackFromState:
+    def _state(self, workdir: Path, name: str, payload: dict[str, Any]) -> Path:
+        path = workdir / name
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        return path
+
+    @pytest.mark.asyncio
+    async def test_ec2_state_uses_ec2_module(
+        self, workdir: Path, recorded_commands: list[list[str]]
+    ) -> None:
+        state = self._state(
+            workdir, "fail_az.ec2.json", {"DryRun": False, "Subnets": [], "Instances": []}
+        )
+
+        result = await server_module.rollback_from_state({"state_files": [str(state)]})
+
+        assert len(recorded_commands) == 1
+        assert "azchaosaws.ec2.actions" in result[0].text
+        assert "SUCCESS" in result[0].text
+
+    @pytest.mark.asyncio
+    async def test_asg_state_uses_asg_module(
+        self, workdir: Path, recorded_commands: list[list[str]]
+    ) -> None:
+        state = self._state(
+            workdir, "state.json", {"DryRun": False, "AutoScalingGroups": [{"Name": "a"}]}
+        )
+
+        result = await server_module.rollback_from_state({"state_files": [str(state)]})
+
+        assert "azchaosaws.asg.actions" in result[0].text
+
+    @pytest.mark.asyncio
+    async def test_module_is_not_guessed_from_the_file_name(
+        self, workdir: Path, recorded_commands: list[list[str]]
+    ) -> None:
+        # A path mentioning ec2 but holding ASG state must still roll back the ASG.
+        state = self._state(
+            workdir, "ec2-like-name.json", {"DryRun": False, "AutoScalingGroups": []}
+        )
+
+        result = await server_module.rollback_from_state({"state_files": [str(state)]})
+
+        assert "azchaosaws.asg.actions" in result[0].text
+
+    @pytest.mark.asyncio
+    async def test_dry_run_state_is_skipped(
+        self, workdir: Path, recorded_commands: list[list[str]]
+    ) -> None:
+        state = self._state(workdir, "dry.json", {"DryRun": True, "Subnets": []})
+
+        result = await server_module.rollback_from_state({"state_files": [str(state)]})
+
+        assert recorded_commands == []
+        assert "produced by a dry run" in result[0].text
+
+    @pytest.mark.asyncio
+    async def test_unknown_state_shape_is_reported(
+        self, workdir: Path, recorded_commands: list[list[str]]
+    ) -> None:
+        state = self._state(workdir, "weird.json", {"DryRun": False, "Something": 1})
+
+        result = await server_module.rollback_from_state({"state_files": [str(state)]})
+
+        assert recorded_commands == []
+        assert "pass resource_type explicitly" in result[0].text
+
+    @pytest.mark.asyncio
+    async def test_resource_type_override(
+        self, workdir: Path, recorded_commands: list[list[str]]
+    ) -> None:
+        state = self._state(workdir, "weird.json", {"DryRun": False, "Something": 1})
+
+        result = await server_module.rollback_from_state(
+            {"state_files": [str(state)], "resource_type": "asg"}
+        )
+
+        assert "azchaosaws.asg.actions" in result[0].text
+
+    @pytest.mark.asyncio
+    async def test_missing_state_file_is_reported(
+        self, workdir: Path, recorded_commands: list[list[str]]
+    ) -> None:
+        result = await server_module.rollback_from_state({"state_files": ["./nope.json"]})
+
+        assert recorded_commands == []
+        assert "Skipped" in result[0].text
+
+    @pytest.mark.asyncio
+    async def test_temporary_experiment_is_cleaned_up(
+        self, workdir: Path, recorded_commands: list[list[str]]
+    ) -> None:
+        state = self._state(workdir, "fail_az.ec2.json", {"DryRun": False, "Subnets": []})
+
+        await server_module.rollback_from_state({"state_files": [str(state)]})
+
+        assert not list(workdir.glob("chaos-rollback-*.json"))
+
+
+class TestCommandResult:
+    def test_render_includes_streams(self) -> None:
+        rendered = CommandResult(1, "out", "err").render("Run")
+
+        assert "FAILED" in rendered
+        assert "out" in rendered
+        assert "err" in rendered

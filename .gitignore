@@ -56,12 +56,15 @@ coverage.xml
 ehthumbs.db
 Thumbs.db
 
-# Chaos Toolkit
-*.json
-!**/examples/*.json
+# Chaos Toolkit artefacts (generated experiments, journals and AZ failure state)
+*-experiment.json
+journal*.json
 chaos-*.log
-journal.json
+chaostoolkit.log
+chaos-rollback-*.json
 fail_az.*.json
+isolate_az.*.json
+az_partition.*.json
 
 # Temporary files
 *.tmp

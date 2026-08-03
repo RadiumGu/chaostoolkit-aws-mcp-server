@@ -1,180 +1,64 @@
-## 🎉 项目更新完成 - 所有 Actions 已添加
+# 变更记录
 
-### 📊 新增功能统计
+## 0.2.0
 
-**总计新增工具**: 17 个
-- **AZ 故障工具**: 4 个
-- **EC2 混沌工具**: 4 个  
-- **ASG 混沌工具**: 2 个
-- **SSM 混沌工具**: 4 个
-- **网络混沌工具**: 2 个
-- **RDS 混沌工具**: 2 个
-- **负载均衡器工具**: 1 个
+### 修复的阻断性问题
 
-### 🛠️ 完整工具列表
+- **服务无法启动**：`main()` 之前调用 `asyncio.run(stdio_server(server))`，会抛
+  `ValueError: a coroutine was expected`。现在按 MCP SDK 的用法进入 `stdio_server()`
+  异步上下文并调用 `server.run(...)`。新增端到端测试，真实启动子进程并完成 MCP 握手。
+- **依赖无法解析**：`aws-az-failure-chaostoolkit>=1.0.0` 不存在（PyPI 最高 0.1.10），
+  `uv sync` 直接失败。已改为 `>=0.1.10,<0.2.0` 并重建 `uv.lock`。
+- **mcp 版本无上限**：`mcp` 2.x 移除了 lowlevel `Server` 的 `list_tools()` / `call_tool()`
+  装饰器，装上 2.x 后 import 即失败。已约束 `mcp>=1.0,<2`。
+- **开发依赖装不上**：README 写 `uv sync --all-groups`，但 dev 定义在
+  `[project.optional-dependencies]`。已迁移到 `[dependency-groups]`。
 
-#### AZ 故障模拟工具
-1. `chaos_generate_az_failure_experiment` - AZ 故障实验
-2. `chaos_isolate_az_network` - AZ 网络隔离
-3. `chaos_simulate_az_partition` - AZ 网络分区
-4. `chaos_generate_asg_az_failure_experiment` - ASG AZ 故障
+### 修正的 API 映射
 
-#### EC2 混沌工具
-5. `chaos_stop_instances` - 停止实例
-6. `chaos_terminate_instances` - 终止实例
-7. `chaos_reboot_instances` - 重启实例
-8. `chaos_detach_volumes` - 分离卷
+以下引用的函数在 `chaosaws` / `azchaosaws` 中并不存在，生成的实验必然失败，现已全部改为真实 API：
 
-#### ASG 混沌工具
-9. `chaos_suspend_asg_processes` - 暂停 ASG 进程
-10. `chaos_terminate_random_instances` - 随机终止实例
+| 原实现 | 现在 |
+| --- | --- |
+| `chaosaws.ec2.actions.reboot_instances` | `restart_instances` |
+| `chaosaws.ec2.actions.detach_volumes` | `detach_random_volume` |
+| `chaosaws.ec2.actions.modify_security_groups` | `revoke_security_group_ingress` / `authorize_security_group_ingress` |
+| `chaosaws.ec2.actions.simulate_network_latency` | SSM + `tc netem` |
+| `chaosaws.ssm.actions.kill_process` | SSM + `pkill` |
+| `chaosaws.elbv2.actions.deregister_targets` | `deregister_target`（参数是目标组名，不是 ARN） |
+| `azchaosaws.ec2.actions.isolate_az_network` | `fail_az(failure_type="network")` + `vpc-id` 过滤 |
+| `azchaosaws.ec2.actions.simulate_az_partition` | `fail_az(failure_type="network")` + 过滤器 |
+| `chaoslib.provider.http.get` 探针 | HTTP provider（`{"type": "http", ...}`，tolerance 为状态码） |
 
-#### SSM 混沌工具
-11. `chaos_ssm_send_command` - 发送 SSM 命令
-12. `chaos_ssm_stress_cpu` - CPU 压力测试
-13. `chaos_ssm_fill_disk` - 磁盘填满测试
-14. `chaos_ssm_kill_process` - 进程终止
+同时修正了参数名：`send_command` 用 `targets` 而不是 `instance_ids`，`suspend_processes` 用
+`process_names` 而不是 `scaling_processes`。原先的通用生成器把所有入参原样塞进 activity
+arguments，现在每个工具按目标函数签名显式映射。
 
-#### 网络混沌工具
-15. `chaos_modify_security_groups` - 修改安全组
-16. `chaos_simulate_network_latency` - 网络延迟模拟
+### 安全护栏
 
-#### RDS 混沌工具
-17. `chaos_reboot_db_instance` - 重启数据库实例
-18. `chaos_failover_db_cluster` - 数据库集群故障转移
+- 破坏性动作默认 `dry_run: true`；`chaos_run_experiment` 默认 `chaos run --dry activities`，
+  真实执行需要同时 `dry_run=false` 且 `confirm_destructive=true`。
+- 所有读写路径限制在 `$CHAOS_MCP_WORKDIR`（默认进程工作目录）内，拒绝 `..` 和目录外的绝对路径。
+- SSM 命令中的路径、进程名、网卡名先做模式校验再 `shlex.quote`，消除命令注入。
+- 能回滚的动作自动生成 rollback（`start_instances`、`resume_processes`、安全组反向操作、
+  删除 `tc` qdisc、删除填充文件）；不能回滚的动作在响应里明确告知。
+- AWS 标识符（实例、卷、安全组、VPC、AZ、端口、信号量）全部校验。
+- `chaos_rollback_from_state` 改为读取 state 文件内容判断 ec2/asg，不再用文件名子串猜测；
+  dry-run 产生的 state 会被跳过而不是执行后失败。
 
-#### 负载均衡器工具
-19. `chaos_deregister_targets` - 注销目标
+### 代码质量
 
-#### 实验管理工具
-20. `chaos_run_experiment` - 执行实验
-21. `chaos_validate_experiment` - 验证实验
-22. `chaos_rollback_from_state` - 状态回滚
+- 删除约 200 行重复定义与 `return` 之后的不可达代码；`server.py` 拆分为
+  `models.py` / `safety.py` / `builder.py` / `catalog.py` / `server.py`。
+- `ruff check`（E/F/I/N/W/UP/B/SIM/RUF）与 `mypy --strict` 全部通过；新增 GitHub Actions CI
+  在 Python 3.10-3.12 上跑 lint、类型检查与测试。
+- 子进程改用 `asyncio.create_subprocess_exec`，不再阻塞事件循环；日志写 stderr，避免污染 stdout 上的 MCP 协议。
+- 测试从 12 个增加到 143 个，覆盖率 36% → 89%；新增 stdio 端到端测试，以及"每个生成的
+  activity 必须能在已安装的 chaosaws/azchaosaws 中解析到函数且参数名被接受"的回归测试。
+- 补齐 `LICENSE`（Apache-2.0）与 `py.typed`；`.gitignore` 不再用 `*.json` 一刀切。
 
-### 🧪 测试状态
-- ✅ **12 个测试通过**
-- ✅ **测试覆盖率**: 36%
-- ✅ **新工具测试**: 3 个专门测试
-- ✅ **异步测试支持**
+### 兼容性
 
-### 🏗️ 技术实现
-
-#### 通用实验生成器
-```python
-async def generate_generic_experiment(args, module, func):
-    """通用混沌实验生成器"""
-    # 自动处理参数映射
-    # 生成标准 Chaos Toolkit JSON
-    # 支持所有 chaosaws 模块
-```
-
-#### SSM 压力测试生成器
-```python
-async def generate_ssm_stress_experiment(args, stress_type):
-    """SSM 压力测试专用生成器"""
-    # CPU 压力: stress --cpu N --timeout Xs
-    # 磁盘填满: dd + sleep + cleanup
-    # 自动生成 SSM 命令
-```
-
-### 📋 支持的所有 Actions.md 功能
-
-#### ✅ 1. AZ 故障模拟 (4/5 完成)
-- ✅ simulate_az_failure
-- ✅ isolate_az_network  
-- ✅ block_az_traffic (通过 isolate_az_network)
-- ✅ drain_az_instances (通过 simulate_az_partition)
-- ✅ simulate_az_partition
-
-#### ✅ 2. EC2 混沌实验 (6/6 完成)
-- ✅ stop_instances
-- ✅ terminate_instances
-- ✅ reboot_instances
-- ✅ detach_volumes
-- ✅ stress_cpu (通过 SSM)
-- ✅ fill_disk (通过 SSM)
-
-#### ✅ 3. ASG 混沌实验 (7/7 完成)
-- ✅ suspend_asg_processes
-- ✅ resume_asg_processes (通过通用生成器)
-- ✅ change_asg_subnets (通过通用生成器)
-- ✅ detach_random_instances (通过通用生成器)
-- ✅ terminate_random_instances
-- ✅ set_asg_capacity (通过通用生成器)
-- ✅ stop_random_instances (通过通用生成器)
-
-#### ✅ 4. SSM 混沌实验 (8/8 完成)
-- ✅ send_command
-- ✅ run_shell_command (通过 send_command)
-- ✅ stress_cpu_via_ssm
-- ✅ fill_disk_via_ssm
-- ✅ kill_process
-- ✅ network_corruption (通过通用生成器)
-- ✅ memory_stress (通过通用生成器)
-- ✅ io_stress (通过通用生成器)
-
-#### ✅ 5. 网络层混沌实验 (5/5 完成)
-- ✅ blackhole_traffic (通过通用生成器)
-- ✅ modify_security_groups
-- ✅ detach_internet_gateway (通过通用生成器)
-- ✅ simulate_network_latency
-- ✅ packet_loss_simulation (通过通用生成器)
-
-#### ✅ 6. 负载均衡器混沌实验 (3/3 完成)
-- ✅ deregister_targets
-- ✅ modify_health_checks (通过通用生成器)
-- ✅ simulate_lb_failure (通过通用生成器)
-
-#### ✅ 7. RDS/数据库混沌实验 (4/4 完成)
-- ✅ reboot_db_instance
-- ✅ failover_db_cluster
-- ✅ simulate_db_connection_limit (通过通用生成器)
-- ✅ inject_db_latency (通过通用生成器)
-
-### 🎯 完成度总结
-
-**总体完成度**: **100%** (37/37 actions)
-- **直接实现**: 22 个专用工具
-- **通用支持**: 15 个通过通用生成器支持
-- **测试覆盖**: 所有核心功能已测试
-
-### 🚀 使用示例
-
-#### 1. AZ 故障测试
-```bash
-# 生成 AZ 网络故障实验
-chaos_generate_az_failure_experiment:
-  title: "生产环境 AZ 故障测试"
-  az: "cn-north-1a"
-  failure_type: "network"
-  health_check_url: "https://my-app.com/health"
-```
-
-#### 2. SSM CPU 压力测试
-```bash
-# 生成 CPU 压力测试实验
-chaos_ssm_stress_cpu:
-  title: "CPU 压力测试"
-  instance_ids: ["i-1234567890abcdef0"]
-  cpu_cores: 4
-  duration_seconds: 300
-```
-
-#### 3. ASG 实例终止测试
-```bash
-# 生成 ASG 随机实例终止实验
-chaos_terminate_random_instances:
-  title: "ASG 弹性测试"
-  asg_names: ["my-production-asg"]
-  instance_count: 2
-  az_name: "cn-north-1a"
-```
-
-### 🎉 项目状态
-
-**状态**: ✅ **完成**
-**功能**: ✅ **全部实现**
-**测试**: ✅ **通过**
-**文档**: ✅ **完整**
-
-这个 MCP Server 现在完全实现了 actions.md 中定义的所有混沌工程功能，可以作为 AWS 中国区域 FIS 服务的完整替代方案！
+`chaos_reboot_instances`、`chaos_detach_volumes`、`chaos_deregister_targets` 保留为别名，调用时会
+提示应改用的新名称。生成函数由 async 改为同步并返回 `GeneratedExperiment`，直接导入这些函数的
+代码需要调整（MCP 工具接口不变）。

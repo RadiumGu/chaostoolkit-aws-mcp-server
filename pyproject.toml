@@ -4,30 +4,31 @@ build-backend = "hatchling.build"
 
 [project]
 name = "chaostoolkit-aws-mcp-server"
-version = "0.1.0"
+version = "0.2.0"
 description = "MCP Server for Chaos Toolkit AWS experiments"
 authors = [
-    {name = "Your Name", email = "your.email@example.com"}
+    {name = "RadiumGu"},
 ]
 license = {text = "Apache-2.0"}
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "mcp>=1.0.0",
-    "chaostoolkit>=1.0.0",
+    # The low level decorator API used here was removed in mcp 2.x.
+    "mcp>=1.0.0,<2.0.0",
+    "chaostoolkit>=1.15.0",
     "chaostoolkit-aws>=0.21.0",
-    "aws-az-failure-chaostoolkit>=1.0.0",
-    "boto3>=1.26.0",
+    # Highest published version is 0.1.10.
+    "aws-az-failure-chaostoolkit>=0.1.10,<0.2.0",
     "pydantic>=2.0.0",
-    "pytest>=8.0.0",
-    "pytest-cov>=4.0.0",
-    "pytest-asyncio>=0.21.0",
 ]
 
-[project.optional-dependencies]
+[dependency-groups]
 dev = [
-    "mypy>=1.0.0",
-    "ruff>=0.1.0",
+    "mypy>=1.8.0",
+    "ruff>=0.4.0",
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-cov>=4.0.0",
 ]
 
 [project.scripts]
@@ -41,6 +42,7 @@ include = [
     "/src",
     "/tests",
     "/README.md",
+    "/LICENSE",
 ]
 
 [tool.pytest.ini_options]
@@ -48,6 +50,8 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
+asyncio_mode = "strict"
+asyncio_default_fixture_loop_scope = "function"
 addopts = "--strict-markers --strict-config"
 
 [tool.mypy]
@@ -57,13 +61,20 @@ warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = true
 
+[[tool.mypy.overrides]]
+module = ["mcp.*"]
+ignore_missing_imports = true
+
 [tool.ruff]
 target-version = "py310"
-line-length = 88
+line-length = 100
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "N", "W", "UP"]
+select = ["E", "F", "I", "N", "W", "UP", "B", "SIM", "RUF"]
 ignore = []
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E501"]
 
 [tool.coverage.run]
 source = ["src"]
@@ -75,4 +86,5 @@ exclude_lines = [
     "def __repr__",
     "raise AssertionError",
     "raise NotImplementedError",
+    "if TYPE_CHECKING:",
 ]
