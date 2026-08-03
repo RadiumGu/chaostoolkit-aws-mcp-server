@@ -180,27 +180,39 @@ def _health_probes(args: dict[str, Any]) -> list[Probe]:
         maximum=300,
         default=3,
     )
+    method = safety.choice(
+        args.get("health_check_method"),
+        {"GET", "HEAD", "POST", "PUT", "DELETE", "OPTIONS"},
+        "health_check_method",
+        default="GET",
+    )
+    # Endpoints behind a load balancer often redirect to HTTPS with a certificate
+    # that does not match the load balancer hostname, which fails verification.
+    verify_tls = safety.boolean(
+        args.get("health_check_verify_tls"), "health_check_verify_tls", default=True
+    )
     return [
         HttpProbeConfig(
             name="health-check",
             url=validated,
+            method=method,
             expected_status=status,
             timeout=float(timeout),
+            verify_tls=verify_tls,
         )
     ]
 
 
-def _relative(path: Path) -> str:
-    """Render a path relative to the workdir when possible for portability."""
-    base = safety.workdir()
-    if path.is_relative_to(base):
-        return f"./{path.relative_to(base).as_posix()}"
-    return str(path)
-
-
 def _state_path(args: dict[str, Any], default: str) -> tuple[str, Path]:
+    """Resolve the fail_az state file.
+
+    The reference embedded in the experiment is absolute on purpose: ``chaos run``
+    resolves relative paths against its own working directory, which is not
+    necessarily the workdir, and a state file that ``recover_az`` cannot find
+    means the rollback silently does nothing.
+    """
     path = safety.resolve_output_path(args.get("state_path"), default)
-    return _relative(path), path
+    return str(path), path
 
 
 def _finalise(
@@ -281,12 +293,23 @@ def generate_az_failure_experiment(args: dict[str, Any]) -> GeneratedExperiment:
     warnings: list[str] = []
     if dry_run:
         warnings.append(
-            "dry_run is enabled: fail_az will only report what it would do. "
+            "dry_run is enabled: fail_az only performs read-only calls, and "
+            "recover_az refuses to roll back a state file produced by a dry run. "
             "Pass dry_run=false once the experiment has been reviewed."
         )
-    if not args.get("filters"):
+    # fail_az applies the filters to different resources depending on the failure
+    # type, so a tag that only exists on instances silently matches no subnets.
+    filtered = "subnets (describe_subnets)" if failure_type == "network" else "instances"
+    if args.get("filters"):
         warnings.append(
-            "fail_az only touches resources tagged AZ_FAILURE=True unless you pass custom filters."
+            f"With failure_type='{failure_type}' the filters are applied to {filtered}; "
+            "tag filters must match tags on those resources or fail_az reports "
+            "'No subnets found!' / no instances."
+        )
+    else:
+        warnings.append(
+            f"fail_az adds the default filter tag:AZ_FAILURE=True and applies it to "
+            f"{filtered}; tag those resources or pass your own filters."
         )
 
     return _finalise(
@@ -323,7 +346,8 @@ def generate_asg_az_failure_experiment(args: dict[str, Any]) -> GeneratedExperim
     warnings: list[str] = []
     if dry_run:
         warnings.append(
-            "dry_run is enabled: fail_az will only report what it would do. "
+            "dry_run is enabled: fail_az only performs read-only calls, and "
+            "recover_az refuses to roll back a state file produced by a dry run. "
             "Pass dry_run=false once the experiment has been reviewed."
         )
 

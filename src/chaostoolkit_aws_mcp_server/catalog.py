@@ -49,10 +49,27 @@ _COMMON = {
     "tags": {**_STRING_LIST, "description": "Experiment tags"},
     "health_check_url": {
         "type": "string",
-        "description": "Optional URL probed as steady state hypothesis (HTTP provider)",
+        "description": (
+            "Optional URL probed as steady state hypothesis (HTTP provider). It is "
+            "checked before and after the method, so a failing probe aborts the run "
+            "before any chaos is injected."
+        ),
     },
     "health_check_status": {"type": "integer", "default": 200},
     "health_check_timeout": {"type": "integer", "default": 3},
+    "health_check_method": {
+        "type": "string",
+        "enum": ["GET", "HEAD", "POST", "PUT", "DELETE", "OPTIONS"],
+        "default": "GET",
+    },
+    "health_check_verify_tls": {
+        "type": "boolean",
+        "default": True,
+        "description": (
+            "Set to false when the endpoint redirects to HTTPS with a certificate that "
+            "does not match the host, which is common for raw load balancer DNS names"
+        ),
+    },
     "output_file": {"type": "string", "description": "Where to write the experiment JSON"},
     "aws_region": {
         "type": "string",

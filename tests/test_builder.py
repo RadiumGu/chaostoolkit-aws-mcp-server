@@ -52,6 +52,60 @@ class TestExperimentAssembly:
         assert "steady-state-hypothesis" not in experiment
 
 
+class TestHealthCheckProbe:
+    def test_defaults(self, workdir: Path) -> None:
+        generated = builder.generate_restart_instances_experiment(
+            {
+                "title": "t",
+                "instance_ids": [INSTANCE_ID],
+                "health_check_url": "https://example.com/health",
+            }
+        )
+
+        provider = generated.experiment["steady-state-hypothesis"]["probes"][0]["provider"]
+        assert provider == {
+            "type": "http",
+            "url": "https://example.com/health",
+            "method": "GET",
+            "timeout": 3.0,
+            "verify_tls": True,
+        }
+
+    def test_method_status_and_tls_are_configurable(self, workdir: Path) -> None:
+        generated = builder.generate_restart_instances_experiment(
+            {
+                "title": "t",
+                "instance_ids": [INSTANCE_ID],
+                "health_check_url": "http://alb.example.com/",
+                "health_check_method": "HEAD",
+                "health_check_status": 301,
+                "health_check_timeout": 10,
+                "health_check_verify_tls": False,
+            }
+        )
+
+        probe = generated.experiment["steady-state-hypothesis"]["probes"][0]
+        assert probe["tolerance"] == 301
+        assert probe["provider"]["method"] == "HEAD"
+        assert probe["provider"]["verify_tls"] is False
+        assert probe["provider"]["timeout"] == 10.0
+
+    def test_url_and_method_are_validated(self, workdir: Path) -> None:
+        with pytest.raises(safety.ValidationError, match="health_check_url"):
+            builder.generate_restart_instances_experiment(
+                {"title": "t", "instance_ids": [INSTANCE_ID], "health_check_url": "not-a-url"}
+            )
+        with pytest.raises(safety.ValidationError, match="health_check_method"):
+            builder.generate_restart_instances_experiment(
+                {
+                    "title": "t",
+                    "instance_ids": [INSTANCE_ID],
+                    "health_check_url": "https://example.com/",
+                    "health_check_method": "TRACE",
+                }
+            )
+
+
 class TestGeneratedApisExist:
     """Every generated activity must resolve to a real function."""
 
@@ -98,18 +152,22 @@ class TestAzFailure:
 
         arguments = generated.experiment["method"][0]["provider"]["arguments"]
         assert arguments["dry_run"] is True
-        assert any("dry_run is enabled" in warning for warning in generated.warnings)
+        assert any("recover_az refuses to roll back" in w for w in generated.warnings)
 
-    def test_rollback_uses_same_state_path(self, workdir: Path) -> None:
+    def test_rollback_uses_same_absolute_state_path(self, workdir: Path) -> None:
         generated = builder.generate_az_failure_experiment(
             {"title": "t", "az": "us-east-1a", "state_path": "./state/fail.json"}
         )
 
         method = generated.experiment["method"][0]["provider"]
         rollback = generated.experiment["rollbacks"][0]["provider"]
-        assert method["arguments"]["state_path"] == "./state/fail.json"
+        expected = str(workdir / "state/fail.json")
+        # Absolute: chaos run resolves relative paths against its own cwd, which
+        # would leave recover_az unable to find the state file.
+        assert method["arguments"]["state_path"] == expected
         assert rollback["func"] == "recover_az"
-        assert rollback["arguments"]["state_path"] == "./state/fail.json"
+        assert rollback["arguments"]["state_path"] == expected
+        assert Path(expected).is_absolute()
 
     def test_destructive_tag_and_note(self, workdir: Path) -> None:
         generated = builder.generate_az_failure_experiment(
@@ -122,6 +180,32 @@ class TestAzFailure:
     def test_invalid_az_is_rejected(self, workdir: Path) -> None:
         with pytest.raises(safety.ValidationError, match="az has an invalid value"):
             builder.generate_az_failure_experiment({"title": "t", "az": "us-east"})
+
+    def test_filter_warning_names_the_filtered_resource(self, workdir: Path) -> None:
+        # Verified against a live VPC: with failure_type=network, fail_az filters
+        # subnets, so an instance-only tag yields "No subnets found!".
+        network = builder.generate_az_failure_experiment(
+            {
+                "title": "t",
+                "az": "us-east-1a",
+                "filters": [{"Name": "tag:eks:nodegroup-name", "Values": ["ng"]}],
+            }
+        )
+        assert any("applied to subnets" in warning for warning in network.warnings)
+
+        instance = builder.generate_az_failure_experiment(
+            {
+                "title": "t",
+                "az": "us-east-1a",
+                "failure_type": "instance",
+                "filters": [{"Name": "tag:eks:nodegroup-name", "Values": ["ng"]}],
+            }
+        )
+        assert any("applied to instances" in warning for warning in instance.warnings)
+
+    def test_default_filter_warning_mentions_the_tag(self, workdir: Path) -> None:
+        generated = builder.generate_az_failure_experiment({"title": "t", "az": "us-east-1a"})
+        assert any("tag:AZ_FAILURE=True" in warning for warning in generated.warnings)
 
     def test_partial_partition_requires_filters(self, workdir: Path) -> None:
         with pytest.raises(safety.ValidationError, match="filters"):

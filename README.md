@@ -78,8 +78,14 @@ only directory the server may touch.
 ## Tools
 
 All generation tools accept `title` (required), `tags`, `health_check_url`, `health_check_status`,
-`health_check_timeout`, `output_file` and `aws_region`. A `health_check_url` becomes a steady state
-hypothesis using the Chaos Toolkit HTTP provider with the status code as tolerance.
+`health_check_timeout`, `health_check_method`, `health_check_verify_tls`, `output_file` and
+`aws_region`. A `health_check_url` becomes a steady state hypothesis using the Chaos Toolkit HTTP
+provider with the status code as tolerance.
+
+Two things to know about that probe: it is evaluated *before* the method, so a failing probe aborts
+the run before any chaos is injected; and the provider follows redirects, so the tolerance must match
+the final status. Raw load balancer DNS names that redirect to HTTPS usually present a certificate
+for a different hostname — pass `health_check_verify_tls: false` for those.
 
 ### Availability zone failure — `azchaosaws`
 
@@ -90,7 +96,15 @@ hypothesis using the Chaos Toolkit HTTP provider with the status code as toleran
 | `chaos_isolate_az_network` | `fail_az(failure_type="network")` scoped by a `vpc-id` filter |
 | `chaos_simulate_az_partition` | `fail_az(failure_type="network")`; a partial partition requires `filters` |
 
-`fail_az` only touches resources tagged `AZ_FAILURE=True` unless you pass your own `filters`.
+`fail_az` applies its filters to different resources depending on `failure_type`: `network` filters
+**subnets** (`describe_subnets`), `instance` filters **instances**. A tag that only exists on your
+instances therefore matches no subnets and `fail_az` fails with `No subnets found!`. Without filters
+it adds `tag:AZ_FAILURE=True`. The generated warnings state which resource your filters will hit.
+
+`state_path` is written into the experiment as an absolute path: `chaos run` resolves relative paths
+against its own working directory, and a state file `recover_az` cannot find means the rollback
+silently does nothing. A state file produced with `dry_run: true` cannot be rolled back —
+`recover_az` refuses it, and `chaos_rollback_from_state` skips it with an explanation.
 
 ### EC2 — `chaosaws.ec2.actions`
 
@@ -192,7 +206,7 @@ uv run ruff check .
 uv run mypy src/ tests/
 ```
 
-143 tests, 89% statement/branch coverage. The suite includes an end-to-end test that starts the
+148 tests, 89% statement/branch coverage. The suite includes an end-to-end test that starts the
 server as a subprocess and speaks MCP over stdio, and a test that asserts every generated activity
 resolves to an existing `chaosaws`/`azchaosaws` function with accepted argument names. CI runs lint,
 types and tests on Python 3.10-3.12.
